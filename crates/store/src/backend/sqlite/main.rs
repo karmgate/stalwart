@@ -16,6 +16,19 @@ impl SqliteStore {
             conn_pool: Pool::builder()
                 .max_size(config.pool_max_connections as u32)
                 .build(SqliteConnectionManager::file(&config.path).with_init(|c| {
+                    // ArmoredPost: optional SQLCipher encryption of the data store.
+                    // The key PRAGMA MUST be the first statement on the connection,
+                    // before journal_mode etc. Raw-key hex form (x'...') = no KDF, so
+                    // VOLT_SQLCIPHER_KEY must be 64 hex chars (32 bytes). If the env
+                    // var is unset/empty the store behaves exactly as upstream (plain
+                    // SQLite), so this is a no-op unless a key is supplied. Requires
+                    // building the `store` crate with the rusqlite
+                    // `bundled-sqlcipher[-vendored-openssl]` feature.
+                    if let Ok(key) = std::env::var("VOLT_SQLCIPHER_KEY") {
+                        if !key.is_empty() {
+                            c.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key))?;
+                        }
+                    }
                     c.execute_batch(concat!(
                         "PRAGMA journal_mode = WAL; ",
                         "PRAGMA synchronous = NORMAL; ",
