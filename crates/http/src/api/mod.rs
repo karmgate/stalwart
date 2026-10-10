@@ -34,8 +34,14 @@ use hyper::{
     header::{self, CONTENT_ENCODING},
 };
 use jmap::api::{ToJmapHttpResponse, ToRequestError};
+use jmap::registry::{get::RegistryGet, set::RegistrySet};
 use jmap_proto::error::request::RequestError;
+use jmap_proto::method::{get::GetRequest, set::SetRequest};
+use jmap_proto::object::registry::Registry;
 use registry::schema::enums::Permission;
+use registry::schema::prelude::ObjectType;
+use registry::types::EnumImpl;
+use common::ipc::RegistryChange;
 use std::time::Duration;
 use utils::url_params::UrlParams;
 
@@ -266,6 +272,52 @@ impl ManagementApi for Server {
                     }
                     _ => Err(trc::ResourceEvent::NotFound.into_err()),
                 }
+            }
+            // ArmoredPost: re-added management API for registry settings (the stock
+            // fork only ships /api/{auth,calendar,discover,account,schema,token,live}).
+            // GET  /api/settings/<ObjectType>        -> list objects of that type
+            // POST /api/settings/<ObjectType> {JMAP SetRequest} -> create/update/destroy
+            "settings" => {
+                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                let object_type = path
+                    .get(1)
+                    .copied()
+                    .and_then(ObjectType::parse)
+                    .ok_or_else(|| trc::ResourceEvent::NotFound.into_err())?;
+                if is_post {
+                    access_token.enforce_permission(Permission::SysSystemSettingsUpdate)?;
+                    let raw = body.ok_or_else(|| trc::LimitEvent::SizeRequest.into_err())?;
+                    let request = serde_json::from_slice::<SetRequest<Registry>>(&raw)
+                        .map_err(|err| {
+                            trc::EventType::Resource(trc::ResourceEvent::BadParameters)
+                                .from_json_error(err)
+                        })?;
+                    self.registry_set(object_type, request, &access_token, session)
+                        .await
+                        .map(|r| JsonResponse::new(r).no_cache().into_http_response())
+                } else {
+                    access_token.enforce_permission(Permission::SysSystemSettingsGet)?;
+                    let request = GetRequest {
+                        account_id: access_token.account_id().into(),
+                        ids: None,
+                        properties: None,
+                        arguments: (),
+                    };
+                    self.registry_get(object_type, request, &access_token)
+                        .await
+                        .map(|r| JsonResponse::new(r).no_cache().into_http_response())
+                }
+            }
+            // ArmoredPost: hot-reload the running config from the store (a full
+            // Core::parse rebuilds session config incl. milters -> no process restart).
+            "reload" if is_post => {
+                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                access_token.enforce_permission(Permission::ActionReloadSettings)?;
+                Box::pin(self.reload_registry(RegistryChange::Reload(ObjectType::DataStore)))
+                    .await?;
+                Ok(JsonResponse::new(serde_json::json!({"status": "reloaded"}))
+                    .no_cache()
+                    .into_http_response())
             }
             _ => Err(trc::ResourceEvent::NotFound.into_err()),
         }
