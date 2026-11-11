@@ -16,6 +16,13 @@ impl SqliteStore {
             conn_pool: Pool::builder()
                 .max_size(config.pool_max_connections as u32)
                 .build(SqliteConnectionManager::file(&config.path).with_init(|c| {
+                    // ArmoredPost: SQLCipher key must be the FIRST statement on the
+                    // connection, before WAL etc. Raw-key hex form (x'...') = no KDF.
+                    if let Ok(key) = std::env::var("VOLT_SQLCIPHER_KEY") {
+                        if !key.is_empty() {
+                            c.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key))?;
+                        }
+                    }
                     c.execute_batch(concat!(
                         "PRAGMA journal_mode = WAL; ",
                         "PRAGMA synchronous = NORMAL; ",
